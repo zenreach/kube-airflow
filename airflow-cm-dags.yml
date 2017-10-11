@@ -1,0 +1,229 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-dags
+  namespace: default
+data:
+  visits_etls.py: |
+    import re
+    import os
+    from airflow import DAG
+    from airflow.operators.bash_operator import BashOperator
+    from datetime import datetime, timedelta
+    from airflow.operators.slack_operator import SlackAPIPostOperator
+
+    START_DATE = datetime(2017, 9, 12, 0, 0)
+
+
+    default_args = {
+        'owner': 'airflow',
+        'depends_on_past': True,
+        'start_date': START_DATE,
+        'retries': 1,
+        'retry_delay': timedelta(minutes=15),
+        'bucket_name': 'zp-uw2-data-archives',
+    }
+
+    dag_default_kwargs = {
+        'start_date': START_DATE,
+        'schedule_interval': timedelta(days=1),
+    }
+
+    default_params = {
+        'blip_archives_path': 's3a://zp-uw2-data-blips',
+        'unmerged_sightings_by_day_path': '/user/hadoop/backfills/airflow/unmerged_sightings',
+        'sightings_by_day_path': '/user/hadoop/backfills/airflow/sightings',
+        's3_sightings_by_day_path': 's3a://zp-uw2-data-archives/processed/parquet/backfills/sightings',
+        's3_network_visits_by_day_path': 's3a://zp-uw2-data-archives/processed/parquet/backfills/network_visits',
+        's3_visits_by_day_path': 's3a://zp-uw2-data-archives/processed/parquet/backfills/visits',
+        's3_visit_counts_by_day_path': 's3a://zp-uw2-data-archives/processed/parquet/backfills/visit_stats',
+        's3_contact_mappings_by_day_path': 's3a://zp-uw2-data-archives/processed/parquet/backfills/contact_mappings',
+        'network_visits_by_day_path': '/user/hadoop/backfills/airflow/network_visits',
+        'visits_by_day_path': '/user/hadoop/backfills/airflow/visits',
+        'visit_counts_by_day_path': '/user/hadoop/backfills/airflow/visit_stats',
+        'contact_mappings_by_day_path': '/user/hadoop/backfills/airflow/contact_mappings',
+        'mongo_exports_path': 's3a://zp-uw2-data-archives/mongo',
+    }
+
+    blips_to_visits = DAG('blips_to_visits', default_args=default_args, params=default_params)
+
+    SLACK_TOKEN = os.getenv("SLACK_TOKEN")
+
+    SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "foundation-test")
+
+    def slack_notify(msg, task_id='slack-notify-msg'):
+        return SlackAPIPostOperator(
+            token=SLACK_TOKEN,
+            channel=SLACK_CHANNEL,
+            username='airflow',
+            text=msg,
+            task_id=task_id
+        )
+
+    def camel_case_to_snake(name):
+        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+        return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+
+    def emr_run(job_name, app_args, task_id=None):
+        job_name_snakecase = camel_case_to_snake(job_name)
+        cmd = "{{ params.visits_backfill_base_dir }}/bin/emr-run.sh {{ params.name }} %s" % ' '.join(app_args)
+        if task_id is None:
+            task_id = 'emr_run_%s' % job_name_snakecase
+        return BashOperator(
+            task_id=task_id,
+            bash_command=cmd,
+            params={
+                'name': job_name,
+                'job_args': app_args,
+                'visits_backfill_base_dir': '/mnt/visitsbackfill-bundle',
+            },
+            start_date=START_DATE,
+        )
+
+    with DAG('blips_to_visit_counts', default_args=default_args, params=default_params, **dag_default_kwargs) as dag:
+        blips_to_unmerged_sightings = emr_run(
+            app_args=['{{ params.blip_archives_path }}',
+                      '{{ params.unmerged_sightings_by_day_path }}',
+                      '{{ params.mongo_exports_path }}/{{ ds }}/portal_router.json',
+                      '{{ ds }}',
+                      '{{ ds }}',
+                      ],
+            job_name='SightingsBackfillByDay',
+            task_id='blips_to_unmerged_sightings',
+        )
+
+        unmerged_sightings_to_sightings = emr_run(
+            app_args=['{{ params.unmerged_sightings_by_day_path }}',
+                      '{{ params.sightings_by_day_path }}',
+                      '{{ ds }}',],
+            job_name='MergeSightingsByDate',
+            task_id='unmerged_sightings_to_sightings',
+        )
+
+
+        exports_contact_mappings = emr_run(
+            app_args=['{{ params.mongo_exports_path }}/{{ ds }}/portal_accessdevice.json',
+                      '{{ params.mongo_exports_path }}/{{ ds }}/portal_accessdeviceownership.json',
+                      '{{ params.mongo_exports_path }}/{{ ds }}/portal_businessrelationship.json',
+                      '{{ params.mongo_exports_path }}/{{ ds }}/portal_userprofile.json',
+                      '{{ params.contact_mappings_by_day_path }}/date={{ ds }}',
+                      ],
+            job_name='ContactMappingsFromMongo',
+            task_id='exports_to_contact_mappings',
+        )
+
+        sightings_to_network_visits = emr_run(
+            app_args=['{{ params.sightings_by_day_path }}',
+                      '{{ params.contact_mappings_by_day_path }}/date={{ ds }}',
+                      '{{ params.network_visits_by_day_path }}/date={{ ds }}',
+                      '{{ ds }}',
+                      ],
+            job_name='SightingsToNetworkVisits',
+            task_id='sightings_to_network_visits',
+        )
+
+        network_visits_to_visits = emr_run(
+            app_args=['{{ params.network_visits_by_day_path }}',
+                      '{{ params.mongo_exports_path }}/{{ ds }}/portal_businessrelationship.json',
+                      '{{ params.visits_by_day_path }}/date={{ ds }}',
+                      '{{ ds }}',
+                      ],
+            job_name='NetworkVisitsToVisits',
+            task_id='network_visits_to_visits',
+        )
+
+        visits_to_counts = emr_run(
+            app_args=['{{ params.visits_by_day_path }}/date={{ ds }}',
+                      '{{ params.visit_counts_by_day_path }}/date={{ yesterday_ds }}',
+                      '{{ params.visit_counts_by_day_path }}/date={{ ds }}',
+                      ],
+            job_name='VisitsToStats',
+            task_id='visits_to_counts',
+        )
+
+        notify_visit_stats_slack = slack_notify("Completed visit stats correction ETL for {{ ds }}.", task_id='notify_visit_stats_slack')
+
+        def s3_dist_cp(src, dest, task_id, params=default_params):
+            cmd = "s3-dist-cp --src %s --dest %s" % (src, dest)
+            return BashOperator(
+                task_id=task_id,
+                bash_command=cmd,
+                params=params,
+                start_date=START_DATE,
+            )
+
+        upload_sightings_s3 = s3_dist_cp(
+            "{{ params.sightings_by_day_path }}/date={{ ds }}",
+            "{{ params.s3_sightings_by_day_path }}/date={{ ds }}",
+            'upload_sightings_s3',
+        )
+
+        upload_visits_s3 = s3_dist_cp(
+            "{{ params.visits_by_day_path }}/date={{ ds }}",
+            "{{ params.s3_visits_by_day_path }}/date={{ ds }}",
+            'upload_visits_s3',
+        )
+
+        upload_network_visits_s3 = s3_dist_cp(
+            "{{ params.network_visits_by_day_path }}/date={{ ds }}",
+            "{{ params.s3_network_visits_by_day_path }}/date={{ ds }}",
+            'upload_network_visits_s3',
+        )
+
+        upload_visit_stats_s3 = s3_dist_cp(
+            "{{ params.visit_counts_by_day_path }}/date={{ ds }}",
+            "{{ params.s3_visit_counts_by_day_path }}/date={{ ds }}",
+            'upload_visit_stats_s3',
+        )
+
+        upload_contact_mappings_s3 = s3_dist_cp(
+            "{{ params.contact_mappings_by_day_path }}/{{ ds }}",
+            "{{ params.s3_contact_mappings_by_day_path }}/date={{ ds }}",
+            'upload_visit_stats_s3',
+        )
+
+        notify_copy_visits_backfills_slack = slack_notify(
+            "Copied corrected visit stats ETLs for {{ ds }} to s3.",
+            task_id='notify_copy_visits_backfills_slack',
+        )
+
+        notify_copy_visits_backfills_slack << upload_sightings_s3
+        notify_copy_visits_backfills_slack << upload_visits_s3
+        notify_copy_visits_backfills_slack << upload_network_visits_s3
+        notify_copy_visits_backfills_slack << upload_contact_mappings_s3
+
+        blips_to_unmerged_sightings >> unmerged_sightings_to_sightings >> upload_sightings_s3
+
+        unmerged_sightings_to_sightings >> sightings_to_network_visits >> network_visits_to_visits
+
+        sightings_to_network_visits >> upload_network_visits_s3
+
+        exports_contact_mappings >> sightings_to_network_visits
+
+        exports_contact_mappings >> upload_contact_mappings_s3
+
+        network_visits_to_visits >> visits_to_counts >> notify_visit_stats_slack
+
+        network_visits_to_visits >> upload_visits_s3
+
+        visits_to_counts >> upload_visit_stats_s3
+
+    with DAG("correct_visit_stats", default_args=default_args, params=default_params, **dag_default_kwargs) as correct_visit_stats:
+        visit_stats_to_kafka = emr_run(
+            app_args=[
+                '{{ params.visit_counts_by_day_path }}/date={{ ds }}',
+                'spark_etl_corrected_visitstat_1',
+            ],
+            job_name='VisitStatsToKafka',
+            task_id='visit_stats_to_kafka',
+        )
+
+        notify_visit_stats_correction_slack = slack_notify(
+            "Sent visit stats correction ETL for {{ ds }} to kafka.",
+            task_id='notify_visit_stats_correction_slack'
+        )
+
+        visit_stats_to_kafka >> notify_visit_stats_correction_slack
+metadata:
+  name: airflow-dags
+  namespace: default

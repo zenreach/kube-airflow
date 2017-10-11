@@ -44,9 +44,8 @@ spec:
   ports:
     - name: web
       protocol: TCP
-      port: 8080
+      port: 80
       targetPort: web
-      nodePort: 32080
 ---
 apiVersion: v1
 kind: Service
@@ -62,7 +61,6 @@ spec:
       protocol: TCP
       port: 5555
       targetPort: flower
-      nodePort: 32081
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment
@@ -140,8 +138,24 @@ spec:
           value: "/usr/local/airflow"
         ports:
         - name: web
-          containerPort: 8080
+          containerPort: 80
         args: ["webserver"]
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: airflow
+  annotations:
+    kubernetes.io/ingress.class: traefik
+spec:
+  rules:
+    - host: airflow.foundation.gke.cntr.io
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: airflow
+              servicePort: web
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment

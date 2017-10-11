@@ -59,7 +59,11 @@ RUN set -ex \
     && pip install ndg-httpsclient \
     && pip install pyasn1 \
     && pip install psycopg2 \
-    && pip install airflow[celery,postgresql,hive]==$AIRFLOW_VERSION \
+    && pip install airflow[celery,postgresql,hive,slack]==$AIRFLOW_VERSION
+
+RUN pip install airflow[gcp_api] \
+    && pip install faker \
+    && pip install pymongo \
     && apt-get remove --purge -yqq $buildDeps libpq-dev \
     && apt-get clean \
     && rm -rf \
@@ -75,10 +79,11 @@ ENV KUBECTL_VERSION %%KUBECTL_VERSION%%
 RUN curl -L -o /usr/local/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl && chmod +x /usr/local/bin/kubectl
 
 COPY script/entrypoint.sh ${AIRFLOW_HOME}/entrypoint.sh
-COPY config/airflow.cfg ${AIRFLOW_HOME}/airflow.cfg
 
 RUN chown -R airflow: ${AIRFLOW_HOME} \
     && chmod +x ${AIRFLOW_HOME}/entrypoint.sh
+
+COPY config/airflow.cfg ${AIRFLOW_HOME}/airflow.cfg
 
 EXPOSE 8080 5555 8793
 

@@ -1,0 +1,67 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: airflow
+    tier: scheduler
+  name: scheduler
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow
+      tier: scheduler
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: airflow
+        tier: scheduler
+    spec:
+      volumes:
+      - name: dags-volume
+        configMap:
+          name: airflow-dags
+          items:
+          - key: visits_etls.py
+            path: visits_etls.py
+      containers:
+      - args:
+        - scheduler
+        - -n
+        - "5"
+        env:
+        - name: AIRFLOW_HOME
+          value: /usr/local/airflow
+        volumeMounts:
+          - name: dags-volume
+            mountPath: /usr/local/airflow/dags
+        image: gcr.io/zenreach-177100/kube-airflow:1.8.0.0-1.6.1-0.10
+        imagePullPolicy: Always
+        name: scheduler
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+status:
+  conditions:
+  - lastTransitionTime: 2017-10-02T22:08:30Z
+    lastUpdateTime: 2017-10-02T22:08:30Z
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    status: "True"
+    type: Available
+  observedGeneration: 1
+  replicas: 1
+  unavailableReplicas: 1
+  updatedReplicas: 1
